@@ -8,10 +8,13 @@ const io = new Server(server, {
   cors: { origin: '*', methods: ['GET', 'POST'] }
 });
 
-const PORT = 3001; // Beda dari cat feeder
+const PORT = 3001;
 
-// { userId: { socketId, location: { lat, lng, timestamp } } }
+// { userId: { socketId, name, partnerId, location, approved } }
 const users = {};
+
+// { inviteId: { from, to, status: 'pending'|'accepted'|'rejected' } }
+const invites = {};
 
 app.use(express.json());
 
@@ -19,7 +22,6 @@ app.get('/', (req, res) => {
   res.json({ status: 'VibratePing running', users: Object.keys(users) });
 });
 
-// Biar Expo app tau URL server (sama kayak pattern cat feeder lo)
 let serverUrl = '';
 app.get('/api/server-url', (req, res) => res.json({ url: serverUrl }));
 app.post('/api/server-url', (req, res) => {
@@ -30,26 +32,126 @@ app.post('/api/server-url', (req, res) => {
 io.on('connection', (socket) => {
   console.log(`[+] Connected: ${socket.id}`);
 
-  // Register user
   socket.on('register', (data) => {
-    const userId = typeof data === 'string' ? data : data.userId;
+    const { userId, name, partnerId } = data;
 
-    if (!userId) {
-      socket.emit('error', 'userId required');
+    if (!userId || !name) {
+      socket.emit('error', 'userId and name required');
       return;
     }
 
-    users[userId] = { socketId: socket.id, location: null };
+    // Kalau reconnect, update socketId-nya aja
+    users[userId] = {
+      socketId: socket.id,
+      name,
+      partnerId: partnerId || null,
+      location: null,
+    };
     socket.userId = userId;
 
-    console.log(`[✓] Registered: ${userId}`);
+    console.log(`[✓] Registered: ${userId} (${name})`);
     socket.emit('registered', { userId, message: 'Connected' });
 
-    // Kasih tau partner kalau user ini online
-    broadcastToPartner(userId, 'partner_status', { online: true });
+    // Kasih tau user ini apakah partnernya sudah online
+    if (partnerId && users[partnerId]) {
+      // Kasih tau diri sendiri bahwa partner online
+      socket.emit('partner_status', {
+        online: true,
+        name: users[partnerId].name,
+        userId: partnerId,
+      });
+
+      // Kasih tau partner bahwa user ini online
+      io.to(users[partnerId].socketId).emit('partner_status', {
+        online: true,
+        name,
+        userId,
+      });
+    }
   });
 
-  // Ping handler (unchanged logic)
+  // === INVITE SYSTEM ===
+
+  // A kirim invite ke B
+  socket.on('send_invite', ({ from, to }) => {
+    if (!from || !to) return socket.emit('error', 'Invalid invite data');
+
+    const target = users[to];
+    if (!target) {
+      socket.emit('invite_result', { success: false, message: `User ${to} tidak ditemukan atau belum online` });
+      return;
+    }
+
+    const inviteId = `${from}-${to}-${Date.now()}`;
+    invites[inviteId] = { from, to, status: 'pending' };
+
+    // Kirim notif invite ke target
+    io.to(target.socketId).emit('incoming_invite', {
+      inviteId,
+      from,
+      fromName: users[from]?.name || from,
+    });
+
+    socket.emit('invite_sent', { inviteId, to });
+    console.log(`[→] Invite: ${from} → ${to} (${inviteId})`);
+  });
+
+  // B respond invite
+  socket.on('respond_invite', ({ inviteId, accept }) => {
+    const invite = invites[inviteId];
+    if (!invite) {
+      socket.emit('error', 'Invite tidak ditemukan');
+      return;
+    }
+
+    invite.status = accept ? 'accepted' : 'rejected';
+
+    const senderUser = users[invite.from];
+    const responderUser = users[invite.to];
+
+    if (accept) {
+      // Update partnerId kedua user
+      if (users[invite.from]) users[invite.from].partnerId = invite.to;
+      if (users[invite.to]) users[invite.to].partnerId = invite.from;
+
+      // Kasih tau sender bahwa invite diterima
+      if (senderUser) {
+        io.to(senderUser.socketId).emit('invite_accepted', {
+          by: invite.to,
+          byName: responderUser?.name || invite.to,
+        });
+
+        // Langsung kasih tau sender bahwa partner online
+        io.to(senderUser.socketId).emit('partner_status', {
+          online: true,
+          name: responderUser?.name || invite.to,
+          userId: invite.to,
+        });
+      }
+
+      // Kasih tau responder juga
+      socket.emit('partner_status', {
+        online: true,
+        name: senderUser?.name || invite.from,
+        userId: invite.from,
+      });
+
+      console.log(`[✓] Invite accepted: ${invite.from} ↔ ${invite.to}`);
+    } else {
+      if (senderUser) {
+        io.to(senderUser.socketId).emit('invite_rejected', {
+          by: invite.to,
+          byName: responderUser?.name || invite.to,
+        });
+      }
+      console.log(`[✗] Invite rejected: ${invite.from} ✗ ${invite.to}`);
+    }
+
+    // Cleanup invite setelah direspon
+    delete invites[inviteId];
+  });
+
+  // Ping
   socket.on('ping', (data) => {
     const { from, to } = data;
     if (!from || !to) return socket.emit('error', 'Invalid ping data');
@@ -59,79 +161,52 @@ io.on('connection', (socket) => {
 
     io.to(target.socketId).emit('ping', {
       from,
-      message: `Ping from ${from}`,
-      timestamp: new Date().toISOString()
+      fromName: users[from]?.name || from,
+      timestamp: new Date().toISOString(),
     });
 
     console.log(`[>>>] Ping: ${from} → ${to}`);
   });
 
-  // Location update — ini yang baru
+  // Location update
   socket.on('location_update', (data) => {
     const { userId, lat, lng } = data;
 
-    if (!userId || lat == null || lng == null) {
-      socket.emit('error', 'Invalid location data');
-      return;
-    }
+    if (!userId || lat == null || lng == null) return;
+    if (!users[userId]) return;
 
-    if (!users[userId]) {
-      socket.emit('error', 'User not registered');
-      return;
-    }
-
-    // Simpan lokasi terbaru
     users[userId].location = { lat, lng, timestamp: new Date().toISOString() };
 
-    // Forward ke partner
-    broadcastToPartner(userId, 'location_update', {
-      from: userId,
-      lat,
-      lng,
-      timestamp: users[userId].location.timestamp
-    });
-  });
-
-  // Request lokasi partner secara eksplisit
-  socket.on('get_location', (data) => {
-    const { from, to } = data;
-    const target = users[to];
-
-    if (!target) {
-      socket.emit('location_response', { error: `${to} not connected` });
-      return;
+    // Forward ke partner spesifik (bukan broadcast ke semua)
+    const partnerId = users[userId].partnerId;
+    if (partnerId && users[partnerId]) {
+      io.to(users[partnerId].socketId).emit('location_update', {
+        from: userId,
+        lat,
+        lng,
+        timestamp: users[userId].location.timestamp,
+      });
     }
-
-    if (!target.location) {
-      socket.emit('location_response', { error: `${to} belum kirim lokasi` });
-      return;
-    }
-
-    socket.emit('location_response', {
-      from: to,
-      ...target.location
-    });
   });
 
   socket.on('disconnect', () => {
     const userId = socket.userId;
-    if (userId && users[userId]) {
-      delete users[userId];
-      broadcastToPartner(userId, 'partner_status', { online: false });
-      console.log(`[-] Disconnected: ${userId}`);
+    if (!userId || !users[userId]) return;
+
+    const partnerId = users[userId].partnerId;
+    delete users[userId];
+
+    // Kasih tau partner spesifik, bukan broadcast
+    if (partnerId && users[partnerId]) {
+      io.to(users[partnerId].socketId).emit('partner_status', {
+        online: false,
+        userId,
+      });
     }
+
+    console.log(`[-] Disconnected: ${userId}`);
   });
 });
-
-// Helper: kirim ke semua user SELAIN pengirim
-// Untuk 2 user, ini otomatis kirim ke partner
-const broadcastToPartner = (senderUserId, event, data) => {
-  Object.entries(users).forEach(([uid, user]) => {
-    if (uid !== senderUserId) {
-      io.to(user.socketId).emit(event, data);
-    }
-  });
-};
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`[VibratePing] Running on :${PORT}`);
