@@ -1,4 +1,4 @@
-// server/server.js (FULLY FIXED - No "from" key in FCM payload)
+// server/server.js
 const express = require("express");
 const http = require("http");
 const { Server } = require("socket.io");
@@ -24,6 +24,7 @@ const PORT = process.env.PORT || 3001;
 const EXPO_EXPERIENCE_ID = "@radelfi/VibratePing";
 const EXPO_SCOPE_KEY = "@radelfi/VibratePing";
 
+// FIX: tambahkan createdAt pada setiap user untuk keperluan cleanup
 const users = {};
 const invites = {};
 
@@ -40,7 +41,7 @@ app.get("/", (req, res) => {
 
 let serverUrl = "";
 app.get("/api/server-url", (req, res) =>
-  res.json({ url: serverUrl || `http://localhost:${PORT}` }),
+  res.json({ url: serverUrl || `http://localhost:${PORT}` })
 );
 app.post("/api/server-url", (req, res) => {
   serverUrl = req.body.url;
@@ -51,14 +52,12 @@ app.post("/api/server-url", (req, res) => {
 app.post("/api/register-token", async (req, res) => {
   const { userId, fcmToken, platform = "android" } = req.body;
   if (!userId || !fcmToken)
-    return res
-      .status(400)
-      .json({ ok: false, error: "userId and fcmToken required" });
+    return res.status(400).json({ ok: false, error: "userId and fcmToken required" });
   try {
-    if (users[userId])
-      ((users[userId].fcmToken = fcmToken),
-        (users[userId].platform = platform));
-    else
+    if (users[userId]) {
+      users[userId].fcmToken = fcmToken;
+      users[userId].platform = platform;
+    } else {
       users[userId] = {
         socketId: null,
         name: null,
@@ -67,7 +66,9 @@ app.post("/api/register-token", async (req, res) => {
         fcmToken,
         platform,
         lastSeen: Date.now(),
+        createdAt: Date.now(),
       };
+    }
     console.log(`[FCM] Token registered: ${userId} (${platform})`);
     res.json({ ok: true, message: "Token registered" });
   } catch (error) {
@@ -78,18 +79,13 @@ app.post("/api/register-token", async (req, res) => {
 app.post("/api/ping-fallback", async (req, res) => {
   const { from, fromName, to, customMessage } = req.body;
   if (!from || !to)
-    return res
-      .status(400)
-      .json({ success: false, error: "from and to are required" });
+    return res.status(400).json({ success: false, error: "from and to are required" });
   const target = users[to];
   if (!target)
-    return res
-      .status(404)
-      .json({ success: false, error: `User ${to} not found` });
+    return res.status(404).json({ success: false, error: `User ${to} not found` });
   if (!target.fcmToken)
-    return res
-      .status(404)
-      .json({ success: false, error: `${to} has no FCM token registered` });
+    return res.status(404).json({ success: false, error: `${to} has no FCM token registered` });
+
   const pingPayload = {
     senderId: from,
     fromName: fromName || from,
@@ -102,7 +98,7 @@ app.post("/api/ping-fallback", async (req, res) => {
     "💛 Rasa Masuk",
     `${fromName || from} lagi kangen kamu${customMessage ? `: ${customMessage}` : ""}`,
     pingPayload,
-    "high",
+    "high"
   );
   if (result.success) {
     console.log(`[PING-FALLBACK] ${from} → ${to} (via FCM HTTP)`);
@@ -153,21 +149,20 @@ const sendFCM = async (fcmToken, title, body, data = {}, priority = "high") => {
       error.code === "messaging/invalid-registration-token" ||
       error.code === "messaging/registration-token-not-registered"
     ) {
-      for (const [userId, userData] of Object.entries(users))
+      for (const [userId, userData] of Object.entries(users)) {
         if (userData.fcmToken === fcmToken) {
           console.log(`[FCM] 🗑️ Removing invalid token for: ${userId}`);
           users[userId].fcmToken = null;
           break;
         }
+      }
     }
     return { success: false, error: error.message, code: error.code };
   }
 };
 
 io.on("connection", (socket) => {
-  console.log(
-    `[SOCKET] + Connected: ${socket.id} from ${socket.handshake.address}`,
-  );
+  console.log(`[SOCKET] + Connected: ${socket.id} from ${socket.handshake.address}`);
 
   socket.on("register", (data) => {
     const { userId, name, partnerId, fcmToken, platform = "android" } = data;
@@ -185,11 +180,10 @@ io.on("connection", (socket) => {
       fcmToken: fcmToken || existingToken || null,
       platform,
       lastSeen: Date.now(),
+      createdAt: users[userId]?.createdAt || Date.now(),
     };
     socket.userId = userId;
-    console.log(
-      `[SOCKET] ✓ Registered: ${userId} as "${name}" (partner: ${partnerId || "none"})`,
-    );
+    console.log(`[SOCKET] ✓ Registered: ${userId} as "${name}" (partner: ${partnerId || "none"})`);
     socket.emit("registered", {
       userId,
       message: "Connected successfully",
@@ -197,9 +191,7 @@ io.on("connection", (socket) => {
     });
     if (partnerId && users[partnerId]) {
       const partnerData = users[partnerId];
-      const partnerOnline = !!(
-        partnerData.socketId && io.sockets.sockets.get(partnerData.socketId)
-      );
+      const partnerOnline = !!(partnerData.socketId && io.sockets.sockets.get(partnerData.socketId));
       socket.emit("partner_status", {
         online: partnerOnline,
         name: partnerData.name,
@@ -224,11 +216,7 @@ io.on("connection", (socket) => {
     }
     const partnerId = user.partnerId;
     if (!partnerId) {
-      socket.emit("partner_status", {
-        online: false,
-        name: null,
-        userId: null,
-      });
+      socket.emit("partner_status", { online: false, name: null, userId: null });
       return;
     }
     const partner = users[partnerId];
@@ -242,29 +230,19 @@ io.on("connection", (socket) => {
 
   socket.on("send_invite", ({ from, to }) => {
     if (!from || !to) {
-      socket.emit("invite_result", {
-        success: false,
-        message: "Invalid invite data",
-      });
+      socket.emit("invite_result", { success: false, message: "Invalid invite data" });
       return;
     }
     const target = users[to];
     if (!target) {
-      socket.emit("invite_result", {
-        success: false,
-        message: `User ${to} not found`,
-      });
+      socket.emit("invite_result", { success: false, message: `User ${to} not found` });
       return;
     }
     const inviteId = `${from}-${to}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     invites[inviteId] = { from, to, status: "pending", createdAt: Date.now() };
     const fromName = users[from]?.name || from;
-    const invitePayload = {
-      inviteId,
-      senderId: from,
-      fromName,
-      type: "invite",
-    };
+    const invitePayload = { inviteId, senderId: from, fromName, type: "invite" };
+
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
       io.to(target.socketId).emit("incoming_invite", invitePayload);
       console.log(`[INVITE] ${from} → ${to} (via socket)`);
@@ -274,7 +252,7 @@ io.on("connection", (socket) => {
         "💌 Undangan Masuk",
         `${fromName} mengundang kamu jadi partner`,
         invitePayload,
-        "high",
+        "high"
       ).then((result) => {
         if (!result.success)
           socket.emit("invite_result", {
@@ -301,14 +279,20 @@ io.on("connection", (socket) => {
       socket.emit("error", "Invite not found or expired");
       return;
     }
+
+    // FIX: simpan referensi lokal sebelum delete, baru delete setelah FCM selesai
     invite.status = accept ? "accepted" : "rejected";
     invite.respondedAt = Date.now();
+
     const sender = users[invite.from];
     const responder = users[invite.to];
     const responderName = responder?.name || invite.to;
+    const inviteCopy = { ...invite }; // copy sebelum delete
+
     if (accept) {
       if (sender) sender.partnerId = invite.to;
       if (responder) responder.partnerId = invite.from;
+
       if (sender?.socketId && io.sockets.sockets.get(sender.socketId)) {
         io.to(sender.socketId).emit("invite_accepted", {
           by: invite.to,
@@ -320,14 +304,23 @@ io.on("connection", (socket) => {
           name: responderName,
           userId: invite.to,
         });
-      } else if (sender?.fcmToken)
+        // Socket tersedia, langsung delete invite
+        delete invites[inviteId];
+      } else if (sender?.fcmToken) {
+        // FIX: delete invite SETELAH FCM resolve
         sendFCM(
           sender.fcmToken,
           "✅ Undangan Diterima",
           `${responderName} menerima undangan kamu!`,
-          { type: "invite_accepted", by: invite.to, byName: responderName },
-          "normal",
-        );
+          { type: "invite_accepted", by: inviteCopy.to, byName: responderName },
+          "normal"
+        ).finally(() => {
+          delete invites[inviteId];
+        });
+      } else {
+        delete invites[inviteId];
+      }
+
       socket.emit("partner_status", {
         online: sender?.socketId ? true : false,
         name: sender?.name || invite.from,
@@ -341,20 +334,21 @@ io.on("connection", (socket) => {
           byName: responderName,
           timestamp: Date.now(),
         });
+      delete invites[inviteId];
       console.log(`[INVITE] ✗ Rejected: ${invite.from} ✗ ${invite.to}`);
     }
-    delete invites[inviteId];
   });
 
+  // FIX: emit ping_ack atau ping_error agar client bisa tahu hasilnya
   socket.on("ping", (data) => {
     const { from, to, customMessage } = data;
     if (!from || !to) {
-      socket.emit("error", "Invalid ping data: from and to required");
+      socket.emit("ping_error", "Invalid ping data: from and to required");
       return;
     }
     const target = users[to];
     if (!target) {
-      socket.emit("error", `User ${to} not found`);
+      socket.emit("ping_error", `User ${to} not found`);
       return;
     }
     const fromName = users[from]?.name || from;
@@ -365,6 +359,7 @@ io.on("connection", (socket) => {
       timestamp: Date.now().toString(),
       ...(customMessage && { customMessage }),
     };
+
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
       io.to(target.socketId).emit("ping", {
         from,
@@ -374,6 +369,7 @@ io.on("connection", (socket) => {
         via: "socket",
         ...(customMessage && { customMessage }),
       });
+      socket.emit("ping_ack"); // FIX: konfirmasi ke pengirim
       console.log(`[PING] ${from} → ${to} (via socket)`);
     } else if (target.fcmToken) {
       sendFCM(
@@ -381,14 +377,17 @@ io.on("connection", (socket) => {
         "💛 Rasa Masuk",
         `${fromName} lagi kangen kamu${customMessage ? `: ${customMessage}` : ""}`,
         pingPayload,
-        "high",
+        "high"
       ).then((result) => {
-        if (!result.success)
-          socket.emit("error", `Failed to send ping via FCM: ${result.error}`);
+        if (result.success) {
+          socket.emit("ping_ack"); // FIX: konfirmasi setelah FCM berhasil
+        } else {
+          socket.emit("ping_error", `Failed to send ping via FCM: ${result.error}`);
+        }
       });
       console.log(`[PING] ${from} → ${to} (via FCM)`);
     } else {
-      socket.emit("error", `${to} is offline and no FCM token registered`);
+      socket.emit("ping_error", `${to} is offline and no FCM token registered`);
       console.log(`[PING] ${from} → ${to} (FAILED: no token)`);
     }
   });
@@ -438,7 +437,7 @@ io.on("connection", (socket) => {
     users[userId].lastSeen = Date.now();
     users[userId].status = "offline";
     console.log(
-      `[SOCKET] - Disconnected: ${userId} (${reason}) | Token: ${userData.fcmToken ? "kept" : "none"}`,
+      `[SOCKET] - Disconnected: ${userId} (${reason}) | Token: ${userData.fcmToken ? "kept" : "none"}`
     );
     if (partnerId && users[partnerId]?.socketId) {
       const partnerSocket = users[partnerId].socketId;
@@ -457,18 +456,35 @@ io.on("connection", (socket) => {
   });
 });
 
-setInterval(
-  () => {
-    const now = Date.now();
-    const EXPIRE_MS = 24 * 60 * 60 * 1000;
-    for (const [inviteId, invite] of Object.entries(invites))
-      if (now - invite.createdAt > EXPIRE_MS) {
-        console.log(`[CLEANUP] Removing expired invite: ${inviteId}`);
-        delete invites[inviteId];
-      }
-  },
-  60 * 60 * 1000,
-);
+// Cleanup invite yang expired (setiap 1 jam)
+setInterval(() => {
+  const now = Date.now();
+  const INVITE_EXPIRE_MS = 24 * 60 * 60 * 1000;
+  for (const [inviteId, invite] of Object.entries(invites)) {
+    if (now - invite.createdAt > INVITE_EXPIRE_MS) {
+      console.log(`[CLEANUP] Removing expired invite: ${inviteId}`);
+      delete invites[inviteId];
+    }
+  }
+}, 60 * 60 * 1000);
+
+// FIX: cleanup user yang sudah lama tidak aktif (setiap 24 jam)
+// Hapus user yang offline lebih dari 30 hari dan tidak punya FCM token
+setInterval(() => {
+  const now = Date.now();
+  const USER_EXPIRE_MS = 30 * 24 * 60 * 60 * 1000; // 30 hari
+  let removed = 0;
+  for (const [userId, userData] of Object.entries(users)) {
+    const isOffline = !userData.socketId;
+    const isOld = now - (userData.lastSeen || 0) > USER_EXPIRE_MS;
+    const hasNoToken = !userData.fcmToken;
+    if (isOffline && isOld && hasNoToken) {
+      delete users[userId];
+      removed++;
+    }
+  }
+  if (removed > 0) console.log(`[CLEANUP] Removed ${removed} stale users`);
+}, 24 * 60 * 60 * 1000);
 
 server.listen(PORT, "0.0.0.0", () => {
   console.log(
@@ -477,7 +493,7 @@ server.listen(PORT, "0.0.0.0", () => {
      \n║   Port: ${PORT}
      \n║   Environment: ${process.env.NODE_ENV || "development"}
      \n║   Expo Experience: ${EXPO_EXPERIENCE_ID}
-     \n╚════════════════════════════════════╝\n`,
+     \n╚════════════════════════════════════╝\n`
   );
 });
 
