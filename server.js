@@ -108,8 +108,9 @@ app.post('/api/ping-fallback', async (req, res) => {
     return res.status(404).json({ success: false, error: `${to} has no FCM token registered` });
   }
 
+  // ✅ Ganti key 'from' -> 'senderId' (reserved key di FCM)
   const pingPayload = {
-    from,
+    senderId: from,               // <-- perubahan
     fromName: fromName || from,
     type: 'ping',
     timestamp: Date.now().toString(),
@@ -261,7 +262,8 @@ io.on('connection', (socket) => {
     invites[inviteId] = { from, to, status: 'pending', createdAt: Date.now() };
 
     const fromName = users[from]?.name || from;
-    const invitePayload = { inviteId, from, fromName, type: 'invite' };
+    // ✅ Ganti key 'from' -> 'senderId' untuk payload FCM
+    const invitePayload = { inviteId, senderId: from, fromName, type: 'invite' };
 
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
       io.to(target.socketId).emit('incoming_invite', invitePayload);
@@ -325,6 +327,7 @@ io.on('connection', (socket) => {
           userId: invite.to,
         });
       } else if (sender?.fcmToken) {
+        // Payload ini tidak mengandung key 'from', aman
         sendFCM(
           sender.fcmToken,
           '✅ Undangan Diterima',
@@ -371,8 +374,9 @@ io.on('connection', (socket) => {
     }
 
     const fromName = users[from]?.name || from;
+    // ✅ Ganti key 'from' -> 'senderId' untuk payload FCM
     const pingPayload = {
-      from,
+      senderId: from,             // <-- perubahan
       fromName,
       type: 'ping',
       timestamp: Date.now().toString(),
@@ -380,14 +384,26 @@ io.on('connection', (socket) => {
     };
 
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
-      io.to(target.socketId).emit('ping', { ...pingPayload, via: 'socket' });
+      // Untuk socket, kita tetap kirimkan dengan key 'from' agar client tidak perlu banyak perubahan
+      // Tapi karena socket event 'ping' ini hanya untuk komunikasi realtime, biarkan saja.
+      // Namun payload yang dikirim ke client via socket bisa pakai 'from' karena bukan FCM.
+      // Tapi konsisten lebih baik pakai 'from' untuk socket, 'senderId' untuk FCM.
+      // Kita kirim via socket tetap dengan struktur asli { from, fromName, type, ... }
+      io.to(target.socketId).emit('ping', {
+        from,
+        fromName,
+        type: 'ping',
+        timestamp: Date.now().toString(),
+        via: 'socket',
+        ...(customMessage && { customMessage }),
+      });
       console.log(`[PING] ${from} → ${to} (via socket)`);
     } else if (target.fcmToken) {
       sendFCM(
         target.fcmToken,
         '💛 Rasa Masuk',
         `${fromName} lagi kangen kamu${customMessage ? `: ${customMessage}` : ''}`,
-        pingPayload,
+        pingPayload,   // payload dengan senderId, aman
         'high'
       ).then((result) => {
         if (!result.success) {
@@ -451,7 +467,6 @@ io.on('connection', (socket) => {
     const userData = users[userId];
     const partnerId = userData.partnerId;
 
-    // Jangan delete — simpan fcmToken untuk fallback offline
     users[userId].socketId = null;
     users[userId].lastSeen = Date.now();
     users[userId].status = 'offline';
