@@ -108,9 +108,9 @@ app.post('/api/ping-fallback', async (req, res) => {
     return res.status(404).json({ success: false, error: `${to} has no FCM token registered` });
   }
 
-  // ✅ Ganti key 'from' -> 'senderId' (reserved key di FCM)
+  // ✅ Gunakan senderId (bukan from) karena reserved key di FCM
   const pingPayload = {
-    senderId: from,               // <-- perubahan
+    senderId: from,
     fromName: fromName || from,
     type: 'ping',
     timestamp: Date.now().toString(),
@@ -232,6 +232,19 @@ io.on('connection', (socket) => {
       timestamp: Date.now(),
     });
 
+    // ✅ Kirim status partner ke user yang baru register jika partner sudah ada
+    if (partnerId && users[partnerId]) {
+      const partnerData = users[partnerId];
+      const partnerOnline = !!(partnerData.socketId && io.sockets.sockets.get(partnerData.socketId));
+      socket.emit('partner_status', {
+        online: partnerOnline,
+        name: partnerData.name,
+        userId: partnerId,
+        lastSeen: partnerData.lastSeen,
+      });
+    }
+
+    // Jika partner sedang online, beri tahu partner bahwa user ini online
     if (partnerId && users[partnerId]) {
       const partnerData = users[partnerId];
       if (partnerData.socketId && io.sockets.sockets.get(partnerData.socketId)) {
@@ -243,6 +256,27 @@ io.on('connection', (socket) => {
         });
       }
     }
+  });
+
+  // ✅ GET PARTNER STATUS (manual request)
+  socket.on('get_partner_status', ({ userId }) => {
+    const user = users[userId];
+    if (!user) {
+      socket.emit('error', 'User not found');
+      return;
+    }
+    const partnerId = user.partnerId;
+    if (!partnerId) {
+      socket.emit('partner_status', { online: false, name: null, userId: null });
+      return;
+    }
+    const partner = users[partnerId];
+    socket.emit('partner_status', {
+      online: !!(partner?.socketId && io.sockets.sockets.get(partner.socketId)),
+      name: partner?.name || null,
+      userId: partnerId,
+      lastSeen: partner?.lastSeen,
+    });
   });
 
   // INVITE SYSTEM
@@ -262,7 +296,7 @@ io.on('connection', (socket) => {
     invites[inviteId] = { from, to, status: 'pending', createdAt: Date.now() };
 
     const fromName = users[from]?.name || from;
-    // ✅ Ganti key 'from' -> 'senderId' untuk payload FCM
+    // ✅ Gunakan senderId untuk FCM
     const invitePayload = { inviteId, senderId: from, fromName, type: 'invite' };
 
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
@@ -327,7 +361,6 @@ io.on('connection', (socket) => {
           userId: invite.to,
         });
       } else if (sender?.fcmToken) {
-        // Payload ini tidak mengandung key 'from', aman
         sendFCM(
           sender.fcmToken,
           '✅ Undangan Diterima',
@@ -374,9 +407,9 @@ io.on('connection', (socket) => {
     }
 
     const fromName = users[from]?.name || from;
-    // ✅ Ganti key 'from' -> 'senderId' untuk payload FCM
+    // ✅ Untuk FCM gunakan senderId
     const pingPayload = {
-      senderId: from,             // <-- perubahan
+      senderId: from,
       fromName,
       type: 'ping',
       timestamp: Date.now().toString(),
@@ -384,11 +417,7 @@ io.on('connection', (socket) => {
     };
 
     if (target.socketId && io.sockets.sockets.get(target.socketId)) {
-      // Untuk socket, kita tetap kirimkan dengan key 'from' agar client tidak perlu banyak perubahan
-      // Tapi karena socket event 'ping' ini hanya untuk komunikasi realtime, biarkan saja.
-      // Namun payload yang dikirim ke client via socket bisa pakai 'from' karena bukan FCM.
-      // Tapi konsisten lebih baik pakai 'from' untuk socket, 'senderId' untuk FCM.
-      // Kita kirim via socket tetap dengan struktur asli { from, fromName, type, ... }
+      // Kirim via socket (aman menggunakan 'from' karena bukan FCM)
       io.to(target.socketId).emit('ping', {
         from,
         fromName,
@@ -403,7 +432,7 @@ io.on('connection', (socket) => {
         target.fcmToken,
         '💛 Rasa Masuk',
         `${fromName} lagi kangen kamu${customMessage ? `: ${customMessage}` : ''}`,
-        pingPayload,   // payload dengan senderId, aman
+        pingPayload,
         'high'
       ).then((result) => {
         if (!result.success) {
